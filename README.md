@@ -75,3 +75,26 @@ Response:
 - Generated lecture files are previewed in the browser and downloaded manually. They are not saved on the server.
 - Backend logs print stage-by-stage progress in the terminal, including transcript fetch, model calls, and request timing.
 - `LECTURE_MODEL` and `PREVIEW_MODEL` can be set independently. If omitted, both fall back to `OPENAI_MODEL`.
+
+## Deploy on Vercel
+
+This repo is configured for Vercel's Python runtime with `app.py` as the ASGI entrypoint and static assets served from `public/static`.
+
+1. Push the repository to GitHub.
+2. Import the repository into Vercel.
+3. Add these environment variables in the Vercel project settings:
+   - `OPENAI_API_KEY`
+   - `OPENAI_MODEL`
+   - `LECTURE_MODEL`
+   - `PREVIEW_MODEL`
+   - `LOG_LEVEL`
+4. Deploy the project.
+
+After the first deploy, validate:
+
+- `GET /health`
+- `GET /`
+- `POST /generate` with a pasted transcript
+- `POST /generate` with a YouTube URL
+
+If generation runs longer than expected on your Vercel plan, move the entrypoint under `api/` and then tune the function settings there.

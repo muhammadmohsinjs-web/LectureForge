@@ -7,7 +7,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app import ModelOutputError, TranscriptFetchError, create_app
+import app as app_module
+from app import AppConfig, ModelOutputError, TranscriptFetchError, create_app
 
 
 def make_client() -> TestClient:
@@ -45,6 +46,15 @@ def test_markdown_output_generates_markdown_download() -> None:
     assert data["download_filename"].endswith(".md")
     assert data["download_content"].startswith("# Clean lecture")
     assert "<html" in data["preview_html"].lower()
+
+
+def test_index_page_includes_output_format_field() -> None:
+    client = make_client()
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert 'id="output_format"' in response.text
 
 
 def test_outline_style_markdown_is_normalized_into_headings() -> None:
@@ -232,3 +242,31 @@ def test_malformed_html_renderer_returns_controlled_error() -> None:
 
     assert response.status_code == 502
     assert "HTML renderer did not return a complete HTML document." in response.json()["detail"]
+
+
+def test_app_config_prefers_public_static_dir(tmp_path: Path) -> None:
+    public_static_dir = tmp_path / "public" / "static"
+    public_static_dir.mkdir(parents=True)
+    (tmp_path / "static").mkdir()
+
+    config = AppConfig.from_env(tmp_path)
+
+    assert config.static_dir == public_static_dir
+
+
+def test_app_config_falls_back_to_legacy_static_dir(tmp_path: Path) -> None:
+    legacy_static_dir = tmp_path / "static"
+    legacy_static_dir.mkdir()
+
+    config = AppConfig.from_env(tmp_path)
+
+    assert config.static_dir == legacy_static_dir
+
+
+def test_create_app_skips_static_mount_when_directory_is_missing(monkeypatch) -> None:
+    missing_static_dir = Path("/tmp/static-dir-that-does-not-exist")
+    monkeypatch.setattr(app_module, "resolve_static_dir", lambda _: missing_static_dir)
+
+    application = app_module.create_app()
+
+    assert all(getattr(route, "name", None) != "static" for route in application.routes)

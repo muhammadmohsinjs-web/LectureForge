@@ -43,6 +43,13 @@ class ModelOutputError(Exception):
     pass
 
 
+def resolve_static_dir(base_dir: Path) -> Path:
+    public_static_dir = base_dir / "public" / "static"
+    if public_static_dir.is_dir():
+        return public_static_dir
+    return base_dir / "static"
+
+
 @dataclass(slots=True)
 class AppConfig:
     base_dir: Path
@@ -63,7 +70,7 @@ class AppConfig:
         return cls(
             base_dir=base_dir,
             prompts_dir=prompts_dir,
-            static_dir=base_dir / "static",
+            static_dir=resolve_static_dir(base_dir),
             templates_dir=base_dir / "templates",
             lecture_prompt_path=prompts_dir / "lecture_prompt.txt",
             preview_prompt_path=prompts_dir / "preview_prompt.txt",
@@ -441,7 +448,8 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Transcript to Lecture Generator")
     app.state.config = config
     app.state.services = services
-    app.mount("/static", StaticFiles(directory=str(config.static_dir)), name="static")
+    if config.static_dir.is_dir():
+        app.mount("/static", StaticFiles(directory=str(config.static_dir)), name="static")
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:

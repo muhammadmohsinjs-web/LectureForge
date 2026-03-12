@@ -21,8 +21,6 @@ const transcriptWordCount = document.getElementById("transcript-word-count");
 const transcriptCharCount = document.getElementById("transcript-char-count");
 const transcriptHelper = document.getElementById("transcript-helper");
 const sourcePriorityNote = document.getElementById("source-priority-note");
-const outputFormatNote = document.getElementById("output-format-note");
-const formatPills = [...document.querySelectorAll(".format-pill")];
 const sourceCards = {
   youtube: document.querySelector('[data-source-card="youtube"]'),
   transcript: document.querySelector('[data-source-card="transcript"]'),
@@ -54,15 +52,7 @@ const loadingStages = [
   },
 ];
 
-const outputFormatNotes = {
-  markdown: "Markdown keeps the lecture portable while the preview remains polished.",
-  html: "HTML produces a full document export when you want a more presentation-ready file.",
-};
-
-const previewModeNotes = {
-  markdown: "Markdown export selected. Reader and raw markdown views stay available.",
-  html: "HTML export selected. Reader preview remains the default, with markdown still available to copy.",
-};
+const previewModeNote = "Markdown export selected. Reader and raw markdown views stay available.";
 
 function setLoading(isLoading) {
   generateButton.disabled = isLoading;
@@ -199,21 +189,6 @@ function updateSourceState() {
 
   if (!loadingStageTimer && !hasRenderedPreview) {
     setPreviewStateChip("Ready to build");
-  }
-}
-
-function updateFormatUI() {
-  const format = form.output_format.value;
-  outputFormatNote.textContent = outputFormatNotes[format];
-
-  formatPills.forEach((pill) => {
-    const isActive = pill.dataset.formatValue === format;
-    pill.classList.toggle("is-active", isActive);
-    pill.setAttribute("aria-pressed", String(isActive));
-  });
-
-  if (!loadingStageTimer && !hasRenderedPreview) {
-    previewMode.textContent = previewModeNotes[format];
   }
 }
 
@@ -774,7 +749,7 @@ function renderEmptyState() {
   hasRenderedPreview = false;
   previewTitle.textContent = "Lecture Preview";
   previewContext.textContent = "Your generated lecture will appear here once the source is ready.";
-  previewMode.textContent = previewModeNotes[form.output_format.value];
+  previewMode.textContent = previewModeNote;
   setPreviewStateChip("Awaiting input");
 
   previewRoot.innerHTML = `
@@ -831,7 +806,7 @@ function startLoadingPreview(isRegenerate) {
   previewContext.textContent = isRegenerate
     ? "Updating the current draft while keeping the reader workspace in focus."
     : "Transforming the source into a study-ready lecture draft.";
-  previewMode.textContent = `${form.output_format.value.toUpperCase()} output in progress`;
+  previewMode.textContent = "Markdown output in progress";
   setPreviewStateChip(isRegenerate ? "Refreshing" : "Generating");
   currentPreviewTab = "reader";
   updateLoadingStage(0);
@@ -868,13 +843,13 @@ function renderPreview(data) {
 
   previewTitle.textContent = data.title || "Generated lecture";
   previewContext.textContent = "Review the composition, spacing, and structure before you download.";
-  previewMode.textContent = `${data.output_format.toUpperCase()} export via ${data.renderer}`;
+  previewMode.textContent = `Markdown export via ${data.renderer}`;
   setPreviewStateChip("Ready to review");
 
-  downloadButton.textContent = data.output_format === "markdown" ? "Download Markdown" : "Download HTML";
+  downloadButton.textContent = "Download Markdown";
   downloadButton.hidden = false;
   regenerateButton.hidden = false;
-  currentPreviewTab = data.output_format === "markdown" ? "markdown" : "reader";
+  currentPreviewTab = "markdown";
   renderCurrentPreview();
 }
 
@@ -909,14 +884,13 @@ async function generateLecture() {
   const hadPreview = hasRenderedPreview;
   resetDownloadState();
   startLoadingPreview(hadPreview);
-  showStatus(`Preparing your ${form.output_format.value} lecture...`);
+  showStatus("Preparing your markdown lecture...");
   setLoading(true);
 
   const payload = {
     title: form.title.value.trim() || null,
     youtube_url: form.youtube_url.value.trim() || null,
     raw_transcript: form.raw_transcript.value.trim() || null,
-    output_format: form.output_format.value,
   };
 
   try {
@@ -934,7 +908,7 @@ async function generateLecture() {
     }
 
     renderPreview(data);
-    showStatus(`Lecture generated in ${data.output_format}. Review the draft or download the file.`);
+    showStatus("Lecture generated in markdown. Review the draft or download the file.");
   } catch (error) {
     stopLoadingPreview();
     showError(error.message || "Generation failed.");
@@ -953,7 +927,6 @@ async function generateLecture() {
   } finally {
     setLoading(false);
     updateSourceState();
-    updateFormatUI();
     updatePreviewActions();
   }
 }
@@ -995,19 +968,6 @@ previewMarkdownTab.addEventListener("click", () => {
   setPreviewTab("markdown");
 });
 
-formatPills.forEach((pill) => {
-  pill.addEventListener("click", () => {
-    const nextFormat = pill.dataset.formatValue;
-    if (!nextFormat || form.output_format.value === nextFormat) {
-      return;
-    }
-
-    form.output_format.value = nextFormat;
-    updateFormatUI();
-  });
-});
-
-form.output_format.addEventListener("change", updateFormatUI);
 form.youtube_url.addEventListener("input", () => {
   updateSourceState();
   updateTranscriptMetrics();
@@ -1026,6 +986,5 @@ document.querySelectorAll("[data-focus-target]").forEach((card) => {
 
 updateTranscriptMetrics();
 updateSourceState();
-updateFormatUI();
 updatePreviewActions();
 resetDownloadState();

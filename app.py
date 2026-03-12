@@ -27,7 +27,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional until dependencies ar
 
 logger = logging.getLogger("transcript_to_lecture")
 
-OutputFormat = Literal["markdown", "html"]
+OutputFormat = Literal["markdown"]
 LectureFormat = Literal["markdown"]
 
 
@@ -57,11 +57,9 @@ class AppConfig:
     static_dir: Path
     templates_dir: Path
     lecture_prompt_path: Path
-    preview_prompt_path: Path
     openai_api_key: str
     openai_model: str
     lecture_model: str
-    preview_model: str
 
     @classmethod
     def from_env(cls, base_dir: Path) -> "AppConfig":
@@ -73,11 +71,9 @@ class AppConfig:
             static_dir=resolve_static_dir(base_dir),
             templates_dir=base_dir / "templates",
             lecture_prompt_path=prompts_dir / "lecture_prompt.txt",
-            preview_prompt_path=prompts_dir / "preview_prompt.txt",
             openai_api_key=os.getenv("OPENAI_API_KEY", "").strip(),
             openai_model=openai_model,
             lecture_model=os.getenv("LECTURE_MODEL", openai_model).strip() or openai_model,
-            preview_model=os.getenv("PREVIEW_MODEL", openai_model).strip() or openai_model,
         )
 
 
@@ -85,7 +81,6 @@ class GenerateRequest(BaseModel):
     title: str | None = None
     youtube_url: str | None = None
     raw_transcript: str | None = None
-    output_format: OutputFormat = "markdown"
 
 
 class GenerateResponse(BaseModel):
@@ -156,45 +151,11 @@ class MarkdownOutputRenderer:
         )
 
 
-class HtmlOutputRenderer:
-    output_format: OutputFormat = "html"
-    name = "html_llm_renderer"
-
-    def get_configuration_errors(self, services: "AppServices") -> list[str]:
-        return services.get_prompt_errors(
-            (("preview prompt", services.config.preview_prompt_path),)
-        )
-
-    async def render(
-        self,
-        services: "AppServices",
-        title: str,
-        lecture_markdown: str,
-        youtube_url: str | None,
-        request_id: str | None = None,
-    ) -> RenderedOutput:
-        preview_html = await services.generate_preview_html(
-            title,
-            lecture_markdown,
-            youtube_url,
-            request_id=request_id,
-        )
-        return RenderedOutput(
-            output_format="html",
-            renderer=self.name,
-            preview_html=preview_html,
-            download_content=preview_html,
-            download_filename=build_download_filename(title, "html"),
-            download_mime_type="text/html; charset=utf-8",
-        )
-
-
 class AppServices:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self.renderers: dict[OutputFormat, OutputRenderer] = {
             "markdown": MarkdownOutputRenderer(),
-            "html": HtmlOutputRenderer(),
         }
 
     def get_renderer(self, output_format: OutputFormat) -> OutputRenderer:
@@ -335,62 +296,6 @@ class AppServices:
         )
         return normalized_content
 
-    async def generate_preview_html(
-        self,
-        title: str,
-        lecture_markdown: str,
-        youtube_url: str | None,
-        request_id: str | None = None,
-    ) -> str:
-        log_prefix = format_log_prefix(request_id)
-        prompt = self.load_prompt(self.config.preview_prompt_path, "preview_prompt.txt")
-        payload = json.dumps(
-            {
-                "lecture_title": title,
-                "youtube_url": youtube_url,
-                "lecture_markdown": lecture_markdown,
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        logger.info("%sStarting renderer pipeline: markdown to HTML", log_prefix)
-        response_text = await self.run_model(
-            prompt,
-            payload,
-            model=self.config.preview_model,
-            request_id=request_id,
-        )
-        preview_html = extract_html_document(response_text)
-        if not preview_html:
-            raise ModelOutputError(
-                "HTML renderer did not return a complete HTML document."
-            )
-        logger.info("%sFinished renderer pipeline (%s characters)", log_prefix, len(preview_html))
-        return preview_html
-
-    async def render_output(
-        self,
-        output_format: OutputFormat,
-        title: str,
-        lecture_markdown: str,
-        youtube_url: str | None,
-        request_id: str | None = None,
-    ) -> RenderedOutput:
-        renderer = self.get_renderer(output_format)
-        logger.info(
-            "%sDispatching renderer=%s for output_format=%s",
-            format_log_prefix(request_id),
-            renderer.name,
-            output_format,
-        )
-        return await renderer.render(
-            self,
-            title,
-            lecture_markdown,
-            youtube_url,
-            request_id=request_id,
-        )
-
     async def run_model(
         self,
         instructions: str,
@@ -470,10 +375,8 @@ def create_app() -> FastAPI:
             "status": "ok" if all(not item["errors"] for item in format_status.values()) else "degraded",
             "openai_model": config.openai_model,
             "lecture_model": config.lecture_model,
-            "preview_model": config.preview_model,
             "prompt_files": {
                 "lecture_prompt": str(config.lecture_prompt_path),
-                "preview_prompt": str(config.preview_prompt_path),
             },
             "output_formats": format_status,
         }
@@ -484,12 +387,11 @@ def create_app() -> FastAPI:
         started_at = time.perf_counter()
         log_prefix = format_log_prefix(request_id)
         logger.info(
-            "%sGeneration request received with output_format=%s",
+            "%sGeneration request received with markdown output",
             log_prefix,
-            request.output_format,
         )
 
-        config_errors = services.get_configuration_errors(request.output_format)
+        config_errors = services.get_configuration_errors("markdown")
         if config_errors:
             logger.error("%sConfiguration error: %s", log_prefix, " ".join(config_errors))
             raise HTTPException(
@@ -539,8 +441,8 @@ def create_app() -> FastAPI:
                 request_id=request_id,
             )
             lecture_content = normalize_lecture_markdown(lecture_content)
-            rendered_output = await services.render_output(
-                request.output_format,
+            rendered_output = await services.get_renderer("markdown").render(
+                services,
                 resolved_title,
                 lecture_content,
                 youtube_url,
@@ -674,20 +576,6 @@ def transcript_to_text(transcript: Any) -> str:
 def looks_like_html_document(content: str) -> bool:
     normalized = content.strip().lower()
     return "<html" in normalized and "</html>" in normalized
-
-
-def extract_html_document(content: str) -> str | None:
-    if looks_like_html_document(content):
-        return content.strip()
-
-    match = re.search(
-        r"```(?:html)?\s*(<!doctype html.*?</html>|<html.*?</html>)\s*```",
-        content,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    if match:
-        return match.group(1).strip()
-    return None
 
 
 def extract_response_text(response: Any) -> str:

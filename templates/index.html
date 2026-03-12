@@ -1,84 +1,217 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Transcript to Lecture Generator</title>
+    <title>Transcript Studio</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <main class="layout">
-      <section class="panel input-panel">
-        <div class="panel-header">
-          <p class="eyebrow">Transcript to Lecture</p>
-          <h1>Generate a readable lecture from a transcript.</h1>
-          <p class="panel-copy">
-            Paste a raw transcript or provide a YouTube URL. The app runs your
-            two prompt stages, renders the HTML preview, and lets you download
-            the final lecture.
-          </p>
-        </div>
-
-        <form id="generator-form" class="form">
-          <label class="field">
-            <span>Lecture title (optional)</span>
-            <input
-              id="title"
-              name="title"
-              type="text"
-              placeholder="Lecture 1: Introduction to..."
-            />
-          </label>
-
-          <label class="field">
-            <span>YouTube URL (optional)</span>
-            <input
-              id="youtube_url"
-              name="youtube_url"
-              type="url"
-              placeholder="https://www.youtube.com/watch?v=..."
-            />
-          </label>
-
-          <label class="field">
-            <span>Raw transcript</span>
-            <textarea
-              id="raw_transcript"
-              name="raw_transcript"
-              rows="14"
-              placeholder="Paste the full transcript here. If both a URL and transcript are provided, the pasted transcript is used."
-            ></textarea>
-          </label>
-
-          <div class="actions">
-            <button id="generate-button" type="submit">Generate lecture</button>
-            <button id="regenerate-button" type="button" class="secondary" hidden>
-              Regenerate
-            </button>
-            <button id="download-button" type="button" class="secondary" hidden>
-              Download HTML
-            </button>
-          </div>
-        </form>
-
-        <div id="status" class="status" aria-live="polite"></div>
-        <div id="error" class="error" hidden></div>
-      </section>
-
-      <section class="panel preview-panel">
-        <div class="preview-header">
+    <div class="page-shell">
+      <header class="app-header">
+        <div class="brand-block">
+          <div class="brand-mark" aria-hidden="true">TL</div>
           <div>
-            <p class="eyebrow">Preview</p>
-            <h2 id="preview-title">No lecture generated yet</h2>
+            <p class="brand-name">Transcript Studio</p>
+            <p class="brand-copy">Turn raw transcripts into clear, readable lectures.</p>
           </div>
         </div>
-        <iframe
-          id="preview-frame"
-          title="Lecture preview"
-          sandbox="allow-same-origin"
-        ></iframe>
-      </section>
-    </main>
+
+        <p class="header-note">Paste, refine, preview, download.</p>
+      </header>
+
+      <main class="workspace">
+        <section class="composer">
+          <div class="composer-intro">
+            <p class="eyebrow">Input</p>
+            <h1>Build a cleaner lecture draft from rough source material.</h1>
+            <p class="intro-copy">Add a YouTube lecture or paste the transcript directly, then review the finished draft in the reading canvas before export.</p>
+          </div>
+
+          <form id="generator-form" class="form">
+            <section class="form-group">
+              <div class="group-head">
+                <div>
+                  <p class="section-step">Source</p>
+                  <h2>Choose how to start</h2>
+                </div>
+                <p class="section-copy">Pasted transcript content takes priority when both fields are filled.</p>
+              </div>
+
+              <div class="source-grid">
+                <button type="button" class="source-card" data-source-card="youtube" data-focus-target="youtube_url">
+                  <span class="source-card-kicker">Fast start</span>
+                  <strong>YouTube link</strong>
+                  <span>Fetch the lecture title and transcript when available.</span>
+                </button>
+
+                <button type="button" class="source-card" data-source-card="transcript" data-focus-target="raw_transcript">
+                  <span class="source-card-kicker">Best control</span>
+                  <strong>Manual transcript</strong>
+                  <span>Paste the exact transcript you want turned into a polished lecture.</span>
+                </button>
+              </div>
+
+              <p id="source-priority-note" class="helper-note">Paste a transcript for the most controlled result, or use a YouTube link for a faster start.</p>
+            </section>
+
+            <label class="field">
+              <span class="field-label">YouTube URL</span>
+              <input id="youtube_url" name="youtube_url" type="url" placeholder="https://www.youtube.com/watch?v=..." />
+              <span class="field-helper">Use a public lecture URL if you want the app to fetch the source details.</span>
+            </label>
+
+            <label class="field">
+              <span class="field-label">Lecture title</span>
+              <input id="title" name="title" type="text" placeholder="Lecture 1: Introduction to..." />
+              <span class="field-helper">Leave this blank to infer a title from YouTube when possible.</span>
+            </label>
+
+            <section class="form-group form-group-compact">
+              <div class="group-head group-head-split">
+                <div>
+                  <p class="section-step">Transcript</p>
+                  <h2>Paste the raw transcript</h2>
+                  <p class="section-copy">Messy formatting is fine. The lecture is cleaned during generation.</p>
+                </div>
+
+                <div class="metric-cluster" aria-live="polite">
+                  <span id="transcript-word-count" class="metric-pill">0 words</span>
+                  <span id="transcript-char-count" class="metric-pill">0 chars</span>
+                </div>
+              </div>
+
+              <label class="field field-textarea">
+                <span class="field-label">Raw transcript</span>
+                <textarea
+                  id="raw_transcript"
+                  name="raw_transcript"
+                  rows="16"
+                  placeholder="Paste the full transcript here. If both a URL and transcript are provided, the pasted transcript is used."></textarea>
+                <span id="transcript-helper" class="field-helper"> Multi-speaker and lightly messy transcripts are fine. The structure is cleaned during generation. </span>
+              </label>
+            </section>
+
+            <!-- <section class="form-group">
+              <div class="group-head">
+                <div>
+                  <p class="section-step">Output</p>
+                  <h2>Choose the export format</h2>
+                </div>
+                <p id="output-format-note" class="section-copy">
+                  Markdown keeps the lecture portable while the preview remains polished.
+                </p>
+              </div>
+
+              <div class="format-switch" role="group" aria-label="Output format">
+                <button type="button" class="format-pill is-active" data-format-value="markdown" aria-pressed="true">
+                  Markdown
+                </button>
+                <button type="button" class="format-pill" data-format-value="html" aria-pressed="false">
+                  HTML
+                </button>
+              </div>
+
+              <label class="field visually-hidden">
+                <span class="field-label">Output format</span>
+                <select id="output_format" name="output_format">
+                  <option value="markdown" selected>Markdown</option>
+                  <option value="html">HTML</option>
+                </select>
+              </label>
+            </section> -->
+
+            <section class="action-row">
+              <div class="action-copy">
+                <p class="section-step">Generate</p>
+                <h2>Create the lecture draft</h2>
+                <p class="section-copy">Review the structure on the right, then regenerate or download when it feels right.</p>
+              </div>
+
+              <div class="actions">
+                <button id="generate-button" type="submit">Generate lecture</button>
+                <button id="regenerate-button" type="button" class="secondary" hidden>Regenerate</button>
+                <button id="download-button" type="button" class="secondary" hidden>Download</button>
+              </div>
+            </section>
+
+            <div class="feedback-stack">
+              <div id="status" class="status" aria-live="polite">Ready when you are. Add a source and generate a lecture.</div>
+              <div id="error" class="error" hidden></div>
+            </div>
+          </form>
+        </section>
+
+        <section class="preview-panel">
+          <div class="preview-header">
+            <div>
+              <p class="eyebrow">Preview</p>
+              <h2 id="preview-title">Lecture Preview</h2>
+              <p id="preview-context" class="preview-context">Your generated lecture will appear here.</p>
+            </div>
+
+            <div class="preview-badges">
+              <span class="preview-badge">Reading canvas</span>
+              <span id="preview-mode" class="preview-badge preview-badge-muted">Choose a source and output mode.</span>
+            </div>
+          </div>
+
+          <div class="preview-frame">
+            <div class="preview-toolbar">
+              <div class="preview-view-tabs" role="tablist" aria-label="Preview view">
+                <button id="preview-reader-tab" type="button" class="preview-view-tab is-active" aria-selected="true">Reader</button>
+                <button id="preview-markdown-tab" type="button" class="preview-view-tab" aria-selected="false" disabled>Markdown</button>
+              </div>
+
+              <div class="preview-toolbar-actions">
+                <button id="copy-markdown-button" type="button" class="copy-button" hidden>Copy markdown</button>
+                <span id="preview-state-chip" class="preview-state-chip">Awaiting input</span>
+              </div>
+            </div>
+
+            <div class="preview-stage">
+              <div id="preview-surface" aria-label="Lecture preview"></div>
+
+              <div id="preview-overlay" class="preview-overlay" hidden>
+                <div class="loading-card">
+                  <div class="loading-header">
+                    <p class="eyebrow">Generating</p>
+                    <span class="loading-badge">Draft in progress</span>
+                  </div>
+
+                  <h3 id="loading-title">Building your lecture</h3>
+                  <p id="loading-stage" class="loading-copy">Reading transcript and preparing the preview.</p>
+
+                  <div class="loading-progress">
+                    <span id="loading-progress-bar" class="loading-progress-bar"></span>
+                  </div>
+
+                  <div class="loading-steps" aria-hidden="true">
+                    <div class="loading-step is-active" data-stage-index="0">
+                      <span class="loading-step-index">01</span>
+                      <span class="loading-step-label">Clean source</span>
+                    </div>
+                    <div class="loading-step" data-stage-index="1">
+                      <span class="loading-step-index">02</span>
+                      <span class="loading-step-label">Shape lecture</span>
+                    </div>
+                    <div class="loading-step" data-stage-index="2">
+                      <span class="loading-step-index">03</span>
+                      <span class="loading-step-label">Render preview</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <p class="preview-footnote">Use this side to judge pacing, hierarchy, and readability before you export the final lecture.</p>
+        </section>
+      </main>
+    </div>
 
     <script src="/static/app.js" defer></script>
   </body>

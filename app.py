@@ -6,8 +6,9 @@ import os
 import re
 import time
 from dataclasses import dataclass
+from html import escape
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Protocol
 from urllib.error import URLError
 from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import Request, urlopen
@@ -25,6 +26,9 @@ except ModuleNotFoundError:  # pragma: no cover - optional until dependencies ar
     load_dotenv = None
 
 logger = logging.getLogger("transcript_to_lecture")
+
+OutputFormat = Literal["markdown", "html"]
+LectureFormat = Literal["markdown"]
 
 
 class TranscriptFetchError(Exception):
@@ -74,34 +78,147 @@ class GenerateRequest(BaseModel):
     title: str | None = None
     youtube_url: str | None = None
     raw_transcript: str | None = None
+    output_format: OutputFormat = "markdown"
 
 
 class GenerateResponse(BaseModel):
     title: str
     lecture_content: str
+    lecture_format: LectureFormat = "markdown"
+    output_format: OutputFormat
+    renderer: str
     preview_html: str
+    download_content: str
+    download_filename: str
+    download_mime_type: str
+
+
+@dataclass(slots=True)
+class RenderedOutput:
+    output_format: OutputFormat
+    renderer: str
+    preview_html: str
+    download_content: str
+    download_filename: str
+    download_mime_type: str
+
+
+class OutputRenderer(Protocol):
+    output_format: OutputFormat
+    name: str
+
+    def get_configuration_errors(self, services: "AppServices") -> list[str]:
+        ...
+
+    async def render(
+        self,
+        services: "AppServices",
+        title: str,
+        lecture_markdown: str,
+        youtube_url: str | None,
+        request_id: str | None = None,
+    ) -> RenderedOutput:
+        ...
+
+
+class MarkdownOutputRenderer:
+    output_format: OutputFormat = "markdown"
+    name = "markdown_local_preview"
+
+    def get_configuration_errors(self, services: "AppServices") -> list[str]:
+        return []
+
+    async def render(
+        self,
+        services: "AppServices",
+        title: str,
+        lecture_markdown: str,
+        youtube_url: str | None,
+        request_id: str | None = None,
+    ) -> RenderedOutput:
+        log_prefix = format_log_prefix(request_id)
+        logger.info("%sRendering local Markdown preview", log_prefix)
+        preview_html = render_markdown_preview_html(title, lecture_markdown)
+        return RenderedOutput(
+            output_format="markdown",
+            renderer=self.name,
+            preview_html=preview_html,
+            download_content=lecture_markdown,
+            download_filename=build_download_filename(title, "md"),
+            download_mime_type="text/markdown; charset=utf-8",
+        )
+
+
+class HtmlOutputRenderer:
+    output_format: OutputFormat = "html"
+    name = "html_llm_renderer"
+
+    def get_configuration_errors(self, services: "AppServices") -> list[str]:
+        return services.get_prompt_errors(
+            (("preview prompt", services.config.preview_prompt_path),)
+        )
+
+    async def render(
+        self,
+        services: "AppServices",
+        title: str,
+        lecture_markdown: str,
+        youtube_url: str | None,
+        request_id: str | None = None,
+    ) -> RenderedOutput:
+        preview_html = await services.generate_preview_html(
+            title,
+            lecture_markdown,
+            youtube_url,
+            request_id=request_id,
+        )
+        return RenderedOutput(
+            output_format="html",
+            renderer=self.name,
+            preview_html=preview_html,
+            download_content=preview_html,
+            download_filename=build_download_filename(title, "html"),
+            download_mime_type="text/html; charset=utf-8",
+        )
 
 
 class AppServices:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
+        self.renderers: dict[OutputFormat, OutputRenderer] = {
+            "markdown": MarkdownOutputRenderer(),
+            "html": HtmlOutputRenderer(),
+        }
 
-    def get_configuration_errors(self) -> list[str]:
+    def get_renderer(self, output_format: OutputFormat) -> OutputRenderer:
+        return self.renderers[output_format]
+
+    def get_prompt_errors(self, prompt_specs: tuple[tuple[str, Path], ...]) -> list[str]:
         errors: list[str] = []
-        if not self.config.openai_api_key:
-            errors.append("OPENAI_API_KEY is not set.")
-
-        for label, path in (
-            ("lecture prompt", self.config.lecture_prompt_path),
-            ("preview prompt", self.config.preview_prompt_path),
-        ):
+        for label, path in prompt_specs:
             if not path.exists():
                 errors.append(f"The {label} file is missing at {path}.")
                 continue
             if not path.read_text(encoding="utf-8").strip():
                 errors.append(f"The {label} file at {path} is empty.")
-
         return errors
+
+    def get_configuration_errors(self, output_format: OutputFormat | None = None) -> list[str]:
+        errors: list[str] = []
+        if not self.config.openai_api_key:
+            errors.append("OPENAI_API_KEY is not set.")
+
+        errors.extend(
+            self.get_prompt_errors((("lecture prompt", self.config.lecture_prompt_path),))
+        )
+
+        if output_format is None:
+            for renderer in self.renderers.values():
+                errors.extend(renderer.get_configuration_errors(self))
+        else:
+            errors.extend(self.get_renderer(output_format).get_configuration_errors(self))
+
+        return dedupe_errors(errors)
 
     def load_prompt(self, path: Path, label: str) -> str:
         if not path.exists():
@@ -172,7 +289,7 @@ class AppServices:
         logger.info("%sTranscript fetched successfully (%s characters)", log_prefix, len(text))
         return text
 
-    async def generate_lecture_content(
+    async def generate_lecture_markdown(
         self,
         title: str,
         transcript: str,
@@ -190,7 +307,7 @@ class AppServices:
             ensure_ascii=False,
             indent=2,
         )
-        logger.info("%sStarting stage 1: transcript to lecture content", log_prefix)
+        logger.info("%sStarting content pipeline: transcript to markdown lecture", log_prefix)
         content = await self.run_model(
             prompt,
             payload,
@@ -200,15 +317,21 @@ class AppServices:
 
         if looks_like_html_document(content):
             raise ModelOutputError(
-                "Stage 1 returned HTML. lecture_prompt.txt must produce structured lecture content, not HTML."
+                "Stage 1 returned HTML. lecture_prompt.txt must produce Markdown lecture content, not HTML."
             )
-        logger.info("%sFinished stage 1 (%s characters)", log_prefix, len(content.strip()))
-        return content.strip()
+        normalized_content = normalize_lecture_markdown(content)
+        logger.info(
+            "%sFinished content pipeline (%s characters, normalized=%s)",
+            log_prefix,
+            len(normalized_content),
+            "yes" if normalized_content != content.strip() else "no",
+        )
+        return normalized_content
 
     async def generate_preview_html(
         self,
         title: str,
-        lecture_content: str,
+        lecture_markdown: str,
         youtube_url: str | None,
         request_id: str | None = None,
     ) -> str:
@@ -218,12 +341,12 @@ class AppServices:
             {
                 "lecture_title": title,
                 "youtube_url": youtube_url,
-                "lecture_content": lecture_content,
+                "lecture_markdown": lecture_markdown,
             },
             ensure_ascii=False,
             indent=2,
         )
-        logger.info("%sStarting stage 2: lecture content to HTML preview", log_prefix)
+        logger.info("%sStarting renderer pipeline: markdown to HTML", log_prefix)
         response_text = await self.run_model(
             prompt,
             payload,
@@ -233,10 +356,33 @@ class AppServices:
         preview_html = extract_html_document(response_text)
         if not preview_html:
             raise ModelOutputError(
-                "Stage 2 did not return a complete HTML document."
+                "HTML renderer did not return a complete HTML document."
             )
-        logger.info("%sFinished stage 2 (%s characters)", log_prefix, len(preview_html))
+        logger.info("%sFinished renderer pipeline (%s characters)", log_prefix, len(preview_html))
         return preview_html
+
+    async def render_output(
+        self,
+        output_format: OutputFormat,
+        title: str,
+        lecture_markdown: str,
+        youtube_url: str | None,
+        request_id: str | None = None,
+    ) -> RenderedOutput:
+        renderer = self.get_renderer(output_format)
+        logger.info(
+            "%sDispatching renderer=%s for output_format=%s",
+            format_log_prefix(request_id),
+            renderer.name,
+            output_format,
+        )
+        return await renderer.render(
+            self,
+            title,
+            lecture_markdown,
+            youtube_url,
+            request_id=request_id,
+        )
 
     async def run_model(
         self,
@@ -304,10 +450,16 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
-        errors = services.get_configuration_errors()
-        logger.info("Health check requested. status=%s", "ok" if not errors else "degraded")
+        format_status = {
+            output_format: {
+                "renderer": services.get_renderer(output_format).name,
+                "errors": services.get_configuration_errors(output_format),
+            }
+            for output_format in services.renderers
+        }
+        logger.info("Health check requested.")
         return {
-            "status": "ok" if not errors else "degraded",
+            "status": "ok" if all(not item["errors"] for item in format_status.values()) else "degraded",
             "openai_model": config.openai_model,
             "lecture_model": config.lecture_model,
             "preview_model": config.preview_model,
@@ -315,7 +467,7 @@ def create_app() -> FastAPI:
                 "lecture_prompt": str(config.lecture_prompt_path),
                 "preview_prompt": str(config.preview_prompt_path),
             },
-            "errors": errors,
+            "output_formats": format_status,
         }
 
     @app.post("/generate", response_model=GenerateResponse)
@@ -323,9 +475,13 @@ def create_app() -> FastAPI:
         request_id = uuid4().hex[:8]
         started_at = time.perf_counter()
         log_prefix = format_log_prefix(request_id)
-        logger.info("%sGeneration request received", log_prefix)
+        logger.info(
+            "%sGeneration request received with output_format=%s",
+            log_prefix,
+            request.output_format,
+        )
 
-        config_errors = services.get_configuration_errors()
+        config_errors = services.get_configuration_errors(request.output_format)
         if config_errors:
             logger.error("%sConfiguration error: %s", log_prefix, " ".join(config_errors))
             raise HTTPException(
@@ -368,13 +524,15 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=500, detail=str(exc)) from exc
 
         try:
-            lecture_content = await services.generate_lecture_content(
+            lecture_content = await services.generate_lecture_markdown(
                 resolved_title,
                 transcript,
                 youtube_url,
                 request_id=request_id,
             )
-            preview_html = await services.generate_preview_html(
+            lecture_content = normalize_lecture_markdown(lecture_content)
+            rendered_output = await services.render_output(
+                request.output_format,
                 resolved_title,
                 lecture_content,
                 youtube_url,
@@ -391,12 +549,23 @@ def create_app() -> FastAPI:
             raise
 
         duration = time.perf_counter() - started_at
-        logger.info("%sGeneration completed in %.2fs", log_prefix, duration)
+        logger.info(
+            "%sGeneration completed in %.2fs using renderer=%s",
+            log_prefix,
+            duration,
+            rendered_output.renderer,
+        )
 
         return GenerateResponse(
             title=resolved_title,
             lecture_content=lecture_content,
-            preview_html=preview_html,
+            lecture_format="markdown",
+            output_format=rendered_output.output_format,
+            renderer=rendered_output.renderer,
+            preview_html=rendered_output.preview_html,
+            download_content=rendered_output.download_content,
+            download_filename=rendered_output.download_filename,
+            download_mime_type=rendered_output.download_mime_type,
         )
 
     return app
@@ -412,6 +581,58 @@ def clean_text(value: str | None) -> str | None:
 def normalize_transcript(raw_transcript: str) -> str:
     lines = [line.strip() for line in raw_transcript.splitlines() if line.strip()]
     return "\n".join(lines)
+
+
+def normalize_lecture_markdown(raw_markdown: str) -> str:
+    text = raw_markdown.strip()
+    text = strip_markdown_code_fences(text)
+    lines = text.splitlines()
+    normalized_lines: list[str] = []
+    index = 0
+
+    while index < len(lines):
+        line = lines[index].rstrip()
+        stripped = line.strip()
+
+        if not stripped:
+            if normalized_lines and normalized_lines[-1] != "":
+                normalized_lines.append("")
+            index += 1
+            continue
+
+        numbered_match = re.match(r"^\s*(\d+)\.\s+(.+)$", stripped)
+        alpha_match = re.match(r"^\s*([A-Z])\.\s+(.+)$", stripped)
+
+        if numbered_match and is_heading_like(numbered_match.group(2)):
+            heading_text = numbered_match.group(2).strip()
+
+            if heading_text.lower() == "title":
+                next_index = next_non_empty_line_index(lines, index + 1)
+                if next_index is not None:
+                    candidate_title = lines[next_index].strip()
+                    if candidate_title and not starts_markdown_block(candidate_title):
+                        normalized_lines.append(f"## {candidate_title}")
+                        index = next_index + 1
+                        continue
+
+            normalized_lines.append(f"## {heading_text}")
+            index += 1
+            continue
+
+        if alpha_match and is_heading_like(alpha_match.group(2)):
+            normalized_lines.append(f"### {alpha_match.group(2).strip()}")
+            index += 1
+            continue
+
+        if is_plain_heading(stripped):
+            normalized_lines.append(f"## {stripped.rstrip(':')}")
+            index += 1
+            continue
+
+        normalized_lines.append(line)
+        index += 1
+
+    return "\n".join(trim_extra_blank_lines(normalized_lines)).strip()
 
 
 def extract_youtube_video_id(url: str) -> str | None:
@@ -487,6 +708,210 @@ def extract_response_text(response: Any) -> str:
                 collected.append(str(text))
 
     return "".join(collected).strip()
+
+
+def render_markdown_preview_html(title: str, lecture_markdown: str) -> str:
+    body_html = render_markdown_body(lecture_markdown)
+    return f"""<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{escape(title)}</title>
+    <style>
+      :root {{
+        color-scheme: light;
+        --bg: #f6f0e6;
+        --surface: #fffdf8;
+        --text: #2d241d;
+        --muted: #6c5a4d;
+        --border: rgba(64, 48, 29, 0.12);
+        --accent: #9d4f2f;
+      }}
+      * {{
+        box-sizing: border-box;
+      }}
+      body {{
+        margin: 0;
+        font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
+        color: var(--text);
+        background:
+          radial-gradient(circle at top left, rgba(211, 156, 94, 0.22), transparent 28%),
+          linear-gradient(180deg, #fbf6ee 0%, var(--bg) 100%);
+      }}
+      main {{
+        width: min(960px, calc(100% - 32px));
+        margin: 32px auto;
+        padding: 32px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 24px;
+        box-shadow: 0 18px 44px rgba(62, 46, 25, 0.1);
+      }}
+      header {{
+        margin-bottom: 28px;
+        padding-bottom: 20px;
+        border-bottom: 1px solid var(--border);
+      }}
+      .eyebrow {{
+        margin: 0 0 10px;
+        font-size: 0.78rem;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--accent);
+        font-weight: 700;
+      }}
+      h1, h2, h3, h4 {{
+        line-height: 1.1;
+        margin: 1.35em 0 0.55em;
+      }}
+      h1 {{
+        margin-top: 0;
+        font-size: clamp(2rem, 3vw, 3rem);
+      }}
+      h2 {{
+        font-size: 1.65rem;
+      }}
+      h3 {{
+        font-size: 1.25rem;
+      }}
+      p, li {{
+        font-size: 1.02rem;
+        line-height: 1.72;
+      }}
+      ul, ol {{
+        padding-left: 1.35rem;
+      }}
+      blockquote {{
+        margin: 1.4rem 0;
+        padding: 0.9rem 1rem;
+        border-left: 4px solid rgba(157, 79, 47, 0.38);
+        background: rgba(157, 79, 47, 0.06);
+      }}
+      code {{
+        font-family: "SFMono-Regular", "Menlo", monospace;
+        font-size: 0.92em;
+        background: rgba(45, 36, 29, 0.08);
+        padding: 0.12rem 0.35rem;
+        border-radius: 0.35rem;
+      }}
+      pre {{
+        overflow-x: auto;
+        padding: 1rem;
+        border-radius: 16px;
+        background: #f5efe5;
+      }}
+      table {{
+        width: 100%;
+        border-collapse: collapse;
+        margin: 1.2rem 0;
+      }}
+      th, td {{
+        border: 1px solid var(--border);
+        padding: 0.75rem;
+        text-align: left;
+      }}
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="eyebrow">Markdown Preview</p>
+      </header>
+      <article>{body_html}</article>
+    </main>
+  </body>
+</html>"""
+
+
+def render_markdown_body(lecture_markdown: str) -> str:
+    try:
+        import markdown as markdown_package
+    except ModuleNotFoundError:
+        return f"<pre>{escape(lecture_markdown)}</pre>"
+
+    return markdown_package.markdown(
+        lecture_markdown,
+        extensions=["extra", "fenced_code", "tables", "sane_lists", "nl2br"],
+    )
+
+
+def strip_markdown_code_fences(text: str) -> str:
+    if text.startswith("```") and text.endswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 2:
+            return "\n".join(lines[1:-1]).strip()
+    return text
+
+
+def next_non_empty_line_index(lines: list[str], start_index: int) -> int | None:
+    for index in range(start_index, len(lines)):
+        if lines[index].strip():
+            return index
+    return None
+
+
+def starts_markdown_block(line: str) -> bool:
+    stripped = line.lstrip()
+    return bool(
+        re.match(r"^(#{1,6}\s|[-*+]\s|\d+\.\s|[A-Z]\.\s|>|```)", stripped)
+    )
+
+
+def is_heading_like(text: str) -> bool:
+    cleaned = text.strip().rstrip(":")
+    if not cleaned or len(cleaned) > 90:
+        return False
+    if cleaned.endswith((".", "!", "?")):
+        return False
+    return True
+
+
+def is_plain_heading(text: str) -> bool:
+    cleaned = text.strip().rstrip(":")
+    if cleaned.startswith("#"):
+        return False
+    if starts_markdown_block(cleaned):
+        return False
+    if len(cleaned) > 70 or len(cleaned.split()) > 10:
+        return False
+    if cleaned.endswith((".", "!", "?")):
+        return False
+
+    heading_keywords = {
+        "introduction",
+        "summary",
+        "conclusion",
+        "overview",
+        "key takeaways",
+        "main concepts",
+        "main concepts and explanation",
+        "important points",
+        "final thoughts",
+    }
+    return cleaned.lower() in heading_keywords
+
+
+def trim_extra_blank_lines(lines: list[str]) -> list[str]:
+    trimmed: list[str] = []
+    previous_blank = False
+    for line in lines:
+        is_blank = not line.strip()
+        if is_blank and previous_blank:
+            continue
+        trimmed.append(line)
+        previous_blank = is_blank
+    return trimmed
+
+
+def build_download_filename(title: str, extension: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    safe_slug = slug or "lecture"
+    return f"{safe_slug}.{extension}"
+
+
+def dedupe_errors(errors: list[str]) -> list[str]:
+    return list(dict.fromkeys(errors))
 
 
 def configure_logging() -> None:

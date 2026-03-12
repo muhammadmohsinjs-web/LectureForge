@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Transcript to Lecture Generator</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="layout">
+      <section class="panel input-panel">
+        <div class="panel-header">
+          <p class="eyebrow">Transcript to Lecture</p>
+          <h1>Generate a readable lecture from a transcript.</h1>
+          <p class="panel-copy">
+            Paste a raw transcript or provide a YouTube URL. The app runs your
+            two prompt stages, renders the HTML preview, and lets you download
+            the final lecture.
+          </p>
+        </div>
+
+        <form id="generator-form" class="form">
+          <label class="field">
+            <span>Lecture title (optional)</span>
+            <input
+              id="title"
+              name="title"
+              type="text"
+              placeholder="Lecture 1: Introduction to..."
+            />
+          </label>
+
+          <label class="field">
+            <span>YouTube URL (optional)</span>
+            <input
+              id="youtube_url"
+              name="youtube_url"
+              type="url"
+              placeholder="https://www.youtube.com/watch?v=..."
+            />
+          </label>
+
+          <label class="field">
+            <span>Raw transcript</span>
+            <textarea
+              id="raw_transcript"
+              name="raw_transcript"
+              rows="14"
+              placeholder="Paste the full transcript here. If both a URL and transcript are provided, the pasted transcript is used."
+            ></textarea>
+          </label>
+
+          <div class="actions">
+            <button id="generate-button" type="submit">Generate lecture</button>
+            <button id="regenerate-button" type="button" class="secondary" hidden>
+              Regenerate
+            </button>
+            <button id="download-button" type="button" class="secondary" hidden>
+              Download HTML
+            </button>
+          </div>
+        </form>
+
+        <div id="status" class="status" aria-live="polite"></div>
+        <div id="error" class="error" hidden></div>
+      </section>
+
+      <section class="panel preview-panel">
+        <div class="preview-header">
+          <div>
+            <p class="eyebrow">Preview</p>
+            <h2 id="preview-title">No lecture generated yet</h2>
+          </div>
+        </div>
+        <iframe
+          id="preview-frame"
+          title="Lecture preview"
+          sandbox="allow-same-origin"
+        ></iframe>
+      </section>
+    </main>
+
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

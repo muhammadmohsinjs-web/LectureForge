@@ -52,11 +52,19 @@ def resolve_static_dir(base_dir: Path) -> Path:
     return base_dir / "static"
 
 
+def resolve_assets_dir(base_dir: Path) -> Path:
+    public_assets_dir = base_dir / "public" / "assets"
+    if public_assets_dir.is_dir():
+        return public_assets_dir
+    return base_dir / "assets"
+
+
 @dataclass(slots=True)
 class AppConfig:
     base_dir: Path
     prompts_dir: Path
     static_dir: Path
+    assets_dir: Path
     templates_dir: Path
     lecture_prompt_path: Path
     openai_api_key: str
@@ -119,6 +127,7 @@ class AppConfig:
             base_dir=base_dir,
             prompts_dir=prompts_dir,
             static_dir=resolve_static_dir(base_dir),
+            assets_dir=resolve_assets_dir(base_dir),
             templates_dir=base_dir / "templates",
             lecture_prompt_path=prompts_dir / "lecture_prompt.txt",
             openai_api_key=os.getenv("OPENAI_API_KEY", "").strip(),
@@ -499,6 +508,8 @@ def create_app() -> FastAPI:
     app.state.services = services
     if config.static_dir.is_dir():
         app.mount("/static", StaticFiles(directory=str(config.static_dir)), name="static")
+    if config.assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(config.assets_dir)), name="assets")
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:

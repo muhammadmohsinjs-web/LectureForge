@@ -55,6 +55,8 @@ def test_index_page_omits_output_format_field() -> None:
 
     assert response.status_code == 200
     assert 'id="output_format"' not in response.text
+    assert 'href="/assets/classnote-favicon.png"' in response.text
+    assert 'src="/assets/logo.svg"' in response.text
 
 
 def test_outline_style_markdown_is_normalized_into_headings() -> None:
@@ -218,19 +220,26 @@ def test_app_config_prefers_public_static_dir(tmp_path: Path) -> None:
     public_static_dir = tmp_path / "public" / "static"
     public_static_dir.mkdir(parents=True)
     (tmp_path / "static").mkdir()
+    public_assets_dir = tmp_path / "public" / "assets"
+    public_assets_dir.mkdir(parents=True)
+    (tmp_path / "assets").mkdir()
 
     config = AppConfig.from_env(tmp_path)
 
     assert config.static_dir == public_static_dir
+    assert config.assets_dir == public_assets_dir
 
 
 def test_app_config_falls_back_to_legacy_static_dir(tmp_path: Path) -> None:
     legacy_static_dir = tmp_path / "static"
     legacy_static_dir.mkdir()
+    legacy_assets_dir = tmp_path / "assets"
+    legacy_assets_dir.mkdir()
 
     config = AppConfig.from_env(tmp_path)
 
     assert config.static_dir == legacy_static_dir
+    assert config.assets_dir == legacy_assets_dir
 
 
 def test_app_config_reads_generic_transcript_proxy(monkeypatch, tmp_path: Path) -> None:
@@ -284,7 +293,9 @@ def test_fetch_transcript_uses_generic_proxy(monkeypatch, tmp_path: Path) -> Non
 def test_create_app_skips_static_mount_when_directory_is_missing(monkeypatch) -> None:
     missing_static_dir = Path("/tmp/static-dir-that-does-not-exist")
     monkeypatch.setattr(app_module, "resolve_static_dir", lambda _: missing_static_dir)
+    monkeypatch.setattr(app_module, "resolve_assets_dir", lambda _: missing_static_dir)
 
     application = app_module.create_app()
 
     assert all(getattr(route, "name", None) != "static" for route in application.routes)
+    assert all(getattr(route, "name", None) != "assets" for route in application.routes)

@@ -32,7 +32,9 @@ LectureFormat = Literal["markdown"]
 
 
 class TranscriptFetchError(Exception):
-    pass
+    def __init__(self, message: str, status_code: int = 400) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class ConfigurationError(Exception):
@@ -60,11 +62,59 @@ class AppConfig:
     openai_api_key: str
     openai_model: str
     lecture_model: str
+    transcript_proxy_http_url: str
+    transcript_proxy_https_url: str
+    transcript_webshare_proxy_username: str
+    transcript_webshare_proxy_password: str
+    transcript_webshare_locations: tuple[str, ...]
+    transcript_webshare_retries: int
+    transcript_proxy_errors: tuple[str, ...]
 
     @classmethod
     def from_env(cls, base_dir: Path) -> "AppConfig":
         prompts_dir = base_dir / "prompts"
         openai_model = os.getenv("OPENAI_MODEL", "gpt-5-mini").strip() or "gpt-5-mini"
+        transcript_proxy_http_url = os.getenv("TRANSCRIPT_PROXY_HTTP_URL", "").strip()
+        transcript_proxy_https_url = os.getenv("TRANSCRIPT_PROXY_HTTPS_URL", "").strip()
+        transcript_webshare_proxy_username = os.getenv(
+            "TRANSCRIPT_WEBSHARE_PROXY_USERNAME", ""
+        ).strip()
+        transcript_webshare_proxy_password = os.getenv(
+            "TRANSCRIPT_WEBSHARE_PROXY_PASSWORD", ""
+        ).strip()
+        transcript_webshare_locations = tuple(
+            item.strip().upper()
+            for item in os.getenv("TRANSCRIPT_WEBSHARE_LOCATIONS", "").split(",")
+            if item.strip()
+        )
+        transcript_webshare_retries = 10
+        transcript_proxy_errors: list[str] = []
+        transcript_webshare_retries_value = os.getenv("TRANSCRIPT_WEBSHARE_RETRIES", "").strip()
+        if transcript_webshare_retries_value:
+            try:
+                transcript_webshare_retries = int(transcript_webshare_retries_value)
+            except ValueError:
+                transcript_proxy_errors.append("TRANSCRIPT_WEBSHARE_RETRIES must be an integer.")
+
+        has_generic_proxy = bool(transcript_proxy_http_url or transcript_proxy_https_url)
+        has_webshare_proxy = bool(
+            transcript_webshare_proxy_username or transcript_webshare_proxy_password
+        )
+        if has_generic_proxy and has_webshare_proxy:
+            transcript_proxy_errors.append(
+                "Configure either TRANSCRIPT_PROXY_* or TRANSCRIPT_WEBSHARE_PROXY_* env vars, not both."
+            )
+        if (
+            transcript_webshare_proxy_username
+            and not transcript_webshare_proxy_password
+        ) or (
+            transcript_webshare_proxy_password
+            and not transcript_webshare_proxy_username
+        ):
+            transcript_proxy_errors.append(
+                "TRANSCRIPT_WEBSHARE_PROXY_USERNAME and TRANSCRIPT_WEBSHARE_PROXY_PASSWORD must be set together."
+            )
+
         return cls(
             base_dir=base_dir,
             prompts_dir=prompts_dir,
@@ -74,7 +124,24 @@ class AppConfig:
             openai_api_key=os.getenv("OPENAI_API_KEY", "").strip(),
             openai_model=openai_model,
             lecture_model=os.getenv("LECTURE_MODEL", openai_model).strip() or openai_model,
+            transcript_proxy_http_url=transcript_proxy_http_url,
+            transcript_proxy_https_url=transcript_proxy_https_url,
+            transcript_webshare_proxy_username=transcript_webshare_proxy_username,
+            transcript_webshare_proxy_password=transcript_webshare_proxy_password,
+            transcript_webshare_locations=transcript_webshare_locations,
+            transcript_webshare_retries=transcript_webshare_retries,
+            transcript_proxy_errors=tuple(transcript_proxy_errors),
         )
+
+    def transcript_proxy_mode(self) -> str:
+        if (
+            self.transcript_webshare_proxy_username
+            and self.transcript_webshare_proxy_password
+        ):
+            return "webshare"
+        if self.transcript_proxy_http_url or self.transcript_proxy_https_url:
+            return "generic"
+        return "none"
 
 
 class GenerateRequest(BaseModel):
@@ -175,6 +242,7 @@ class AppServices:
         errors: list[str] = []
         if not self.config.openai_api_key:
             errors.append("OPENAI_API_KEY is not set.")
+        errors.extend(self.config.transcript_proxy_errors)
 
         errors.extend(
             self.get_prompt_errors((("lecture prompt", self.config.lecture_prompt_path),))
@@ -235,20 +303,25 @@ class AppServices:
             raise TranscriptFetchError("The YouTube URL is invalid or the video ID could not be parsed.")
         logger.info("%sFetching transcript for video_id=%s", log_prefix, video_id)
 
-        try:
-            from youtube_transcript_api import YouTubeTranscriptApi
-        except ModuleNotFoundError as exc:
-            raise ConfigurationError(
-                "youtube-transcript-api is not installed. Install dependencies before fetching transcripts."
-            ) from exc
+        api = self._build_transcript_api_client(request_id=request_id)
 
         try:
-            transcript = YouTubeTranscriptApi().fetch(video_id)
+            transcript = api.fetch(video_id)
         except Exception as exc:  # pragma: no cover - third-party error surface
-            logger.exception("%sTranscript fetch failed for video_id=%s", log_prefix, video_id)
-            raise TranscriptFetchError(
-                "Transcript fetch failed for this video."
-            ) from exc
+            translated_error = self._translate_transcript_fetch_error(exc)
+            logger.warning(
+                "%sTranscript fetch failed for video_id=%s: %s",
+                log_prefix,
+                video_id,
+                translated_error,
+            )
+            logger.debug(
+                "%sTranscript fetch stack for video_id=%s",
+                log_prefix,
+                video_id,
+                exc_info=exc,
+            )
+            raise translated_error from exc
 
         text = transcript_to_text(transcript)
         if not text:
@@ -256,6 +329,77 @@ class AppServices:
             raise TranscriptFetchError("No transcript text was returned for this video.")
         logger.info("%sTranscript fetched successfully (%s characters)", log_prefix, len(text))
         return text
+
+    def _build_transcript_api_client(self, request_id: str | None = None) -> Any:
+        log_prefix = format_log_prefix(request_id)
+        try:
+            from youtube_transcript_api import YouTubeTranscriptApi
+            from youtube_transcript_api.proxies import GenericProxyConfig, WebshareProxyConfig
+        except ModuleNotFoundError as exc:
+            raise ConfigurationError(
+                "youtube-transcript-api is not installed. Install dependencies before fetching transcripts."
+            ) from exc
+
+        proxy_config = None
+        proxy_mode = self.config.transcript_proxy_mode()
+        if proxy_mode == "webshare":
+            proxy_config = WebshareProxyConfig(
+                proxy_username=self.config.transcript_webshare_proxy_username,
+                proxy_password=self.config.transcript_webshare_proxy_password,
+                filter_ip_locations=list(self.config.transcript_webshare_locations),
+                retries_when_blocked=self.config.transcript_webshare_retries,
+            )
+        elif proxy_mode == "generic":
+            proxy_config = GenericProxyConfig(
+                http_url=self.config.transcript_proxy_http_url or None,
+                https_url=self.config.transcript_proxy_https_url or None,
+            )
+
+        if proxy_config is None:
+            logger.info("%sFetching transcript without proxy", log_prefix)
+        else:
+            logger.info("%sFetching transcript with proxy mode=%s", log_prefix, proxy_mode)
+        return YouTubeTranscriptApi(proxy_config=proxy_config)
+
+    def _translate_transcript_fetch_error(self, exc: Exception) -> TranscriptFetchError:
+        try:
+            from youtube_transcript_api import (
+                IpBlocked,
+                NoTranscriptFound,
+                RequestBlocked,
+                TranscriptsDisabled,
+                VideoUnavailable,
+            )
+            from youtube_transcript_api._errors import HTTPError
+        except ModuleNotFoundError:
+            return TranscriptFetchError("Transcript fetch failed for this video.", status_code=502)
+        except ImportError:
+            from youtube_transcript_api._errors import (
+                HTTPError,
+                IpBlocked,
+                NoTranscriptFound,
+                RequestBlocked,
+                TranscriptsDisabled,
+                VideoUnavailable,
+            )
+
+        if isinstance(exc, (RequestBlocked, IpBlocked)):
+            return TranscriptFetchError(
+                "YouTube blocked transcript requests from the server IP. Configure transcript proxy env vars for production.",
+                status_code=502,
+            )
+        if isinstance(exc, NoTranscriptFound):
+            return TranscriptFetchError("No transcript was found for this video.")
+        if isinstance(exc, TranscriptsDisabled):
+            return TranscriptFetchError("Transcripts are disabled for this video.")
+        if isinstance(exc, VideoUnavailable):
+            return TranscriptFetchError("This video is unavailable.")
+        if isinstance(exc, HTTPError):
+            return TranscriptFetchError(
+                "YouTube transcript request failed upstream. Try again or paste the transcript manually.",
+                status_code=502,
+            )
+        return TranscriptFetchError("Transcript fetch failed for this video.", status_code=502)
 
     async def generate_lecture_markdown(
         self,
@@ -375,6 +519,10 @@ def create_app() -> FastAPI:
             "status": "ok" if all(not item["errors"] for item in format_status.values()) else "degraded",
             "openai_model": config.openai_model,
             "lecture_model": config.lecture_model,
+            "transcript_proxy": {
+                "configured": config.transcript_proxy_mode() != "none",
+                "mode": config.transcript_proxy_mode(),
+            },
             "prompt_files": {
                 "lecture_prompt": str(config.lecture_prompt_path),
             },
@@ -426,7 +574,7 @@ def create_app() -> FastAPI:
             except TranscriptFetchError as exc:
                 logger.warning("%sTranscript fetch error: %s", log_prefix, exc)
                 raise HTTPException(
-                    status_code=400,
+                    status_code=exc.status_code,
                     detail=f"{exc} Paste the transcript manually to continue.",
                 ) from exc
             except ConfigurationError as exc:

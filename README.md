@@ -21,6 +21,8 @@ OPENAI_API_KEY=your_api_key
 OPENAI_MODEL=gpt-5-mini
 LECTURE_MODEL=gpt-5
 LOG_LEVEL=INFO
+TRANSCRIPT_PROXY_HTTP_URL=
+TRANSCRIPT_PROXY_HTTPS_URL=
 ```
 
 ## Prompt files
@@ -65,6 +67,7 @@ Response:
 
 - If both `youtube_url` and `raw_transcript` are provided, the pasted transcript wins.
 - If transcript fetching fails, paste the transcript manually and retry.
+- On cloud deployments such as Vercel, YouTube may block transcript requests from the server IP. When that happens, configure a proxy via `TRANSCRIPT_PROXY_HTTP_URL` / `TRANSCRIPT_PROXY_HTTPS_URL`, or Webshare via `TRANSCRIPT_WEBSHARE_PROXY_USERNAME` / `TRANSCRIPT_WEBSHARE_PROXY_PASSWORD`.
 - The app only generates Markdown output.
 - Generated lecture files are previewed in the browser and downloaded manually. They are not saved on the server.
 - Backend logs print stage-by-stage progress in the terminal, including transcript fetch, model calls, and request timing.
@@ -81,6 +84,8 @@ This repo is configured for Vercel's Python runtime with `app.py` as the ASGI en
    - `OPENAI_MODEL`
    - `LECTURE_MODEL`
    - `LOG_LEVEL`
+   - Optional for production transcript fetching: `TRANSCRIPT_PROXY_HTTP_URL` and/or `TRANSCRIPT_PROXY_HTTPS_URL`
+   - Optional Webshare alternative: `TRANSCRIPT_WEBSHARE_PROXY_USERNAME`, `TRANSCRIPT_WEBSHARE_PROXY_PASSWORD`, `TRANSCRIPT_WEBSHARE_LOCATIONS`, `TRANSCRIPT_WEBSHARE_RETRIES`
 4. Deploy the project.
 
 After the first deploy, validate:
@@ -89,5 +94,7 @@ After the first deploy, validate:
 - `GET /`
 - `POST /generate` with a pasted transcript
 - `POST /generate` with a YouTube URL
+
+`GET /health` now reports whether transcript proxying is configured, which is useful when production works locally but fails on Vercel due to `RequestBlocked` or `IpBlocked`.
 
 If generation runs longer than expected on your Vercel plan, move the entrypoint under `api/` and then tune the function settings there.

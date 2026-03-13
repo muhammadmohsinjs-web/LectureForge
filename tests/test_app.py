@@ -177,6 +177,30 @@ def test_transcript_fetch_failure_returns_manual_fallback_message() -> None:
     assert "Paste the transcript manually to continue" in response.json()["detail"]
 
 
+def test_transcript_request_blocked_returns_proxy_hint(monkeypatch) -> None:
+    import youtube_transcript_api
+
+    client = make_client()
+
+    class FakeYouTubeTranscriptApi:
+        def __init__(self, proxy_config=None) -> None:
+            self.proxy_config = proxy_config
+
+        def fetch(self, video_id: str):
+            raise youtube_transcript_api.RequestBlocked(video_id)
+
+    monkeypatch.setattr(youtube_transcript_api, "YouTubeTranscriptApi", FakeYouTubeTranscriptApi)
+
+    response = client.post(
+        "/generate",
+        json={"youtube_url": "https://www.youtube.com/watch?v=abc123def45"},
+    )
+
+    assert response.status_code == 502
+    assert "YouTube blocked transcript requests from the server IP" in response.json()["detail"]
+    assert "Paste the transcript manually to continue" in response.json()["detail"]
+
+
 def test_health_reports_markdown_only_configuration() -> None:
     client = make_client()
     response = client.get("/health")
@@ -186,6 +210,7 @@ def test_health_reports_markdown_only_configuration() -> None:
     assert data["status"] == "ok"
     assert "preview_model" not in data
     assert "preview_prompt" not in data["prompt_files"]
+    assert data["transcript_proxy"] == {"configured": False, "mode": "none"}
     assert list(data["output_formats"]) == ["markdown"]
 
 
@@ -206,6 +231,54 @@ def test_app_config_falls_back_to_legacy_static_dir(tmp_path: Path) -> None:
     config = AppConfig.from_env(tmp_path)
 
     assert config.static_dir == legacy_static_dir
+
+
+def test_app_config_reads_generic_transcript_proxy(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("TRANSCRIPT_PROXY_HTTP_URL", "http://proxy.internal:8080")
+    monkeypatch.delenv("TRANSCRIPT_PROXY_HTTPS_URL", raising=False)
+    monkeypatch.delenv("TRANSCRIPT_WEBSHARE_PROXY_USERNAME", raising=False)
+    monkeypatch.delenv("TRANSCRIPT_WEBSHARE_PROXY_PASSWORD", raising=False)
+
+    config = AppConfig.from_env(tmp_path)
+
+    assert config.transcript_proxy_mode() == "generic"
+    assert config.transcript_proxy_http_url == "http://proxy.internal:8080"
+    assert config.transcript_proxy_errors == ()
+
+
+def test_fetch_transcript_uses_generic_proxy(monkeypatch, tmp_path: Path) -> None:
+    import youtube_transcript_api
+    from youtube_transcript_api import proxies
+
+    monkeypatch.setenv("TRANSCRIPT_PROXY_HTTP_URL", "http://proxy.internal:8080")
+    monkeypatch.delenv("TRANSCRIPT_PROXY_HTTPS_URL", raising=False)
+    monkeypatch.delenv("TRANSCRIPT_WEBSHARE_PROXY_USERNAME", raising=False)
+    monkeypatch.delenv("TRANSCRIPT_WEBSHARE_PROXY_PASSWORD", raising=False)
+
+    config = AppConfig.from_env(tmp_path)
+    services = app_module.AppServices(config)
+    seen: dict[str, object] = {}
+
+    class FakeGenericProxyConfig:
+        def __init__(self, http_url=None, https_url=None) -> None:
+            seen["http_url"] = http_url
+            seen["https_url"] = https_url
+
+    class FakeYouTubeTranscriptApi:
+        def __init__(self, proxy_config=None) -> None:
+            seen["proxy_config"] = proxy_config
+
+        def fetch(self, video_id: str):
+            return [{"text": "hello world"}]
+
+    monkeypatch.setattr(proxies, "GenericProxyConfig", FakeGenericProxyConfig)
+    monkeypatch.setattr(youtube_transcript_api, "YouTubeTranscriptApi", FakeYouTubeTranscriptApi)
+
+    transcript = services._fetch_transcript_sync("https://www.youtube.com/watch?v=abc123def45")
+
+    assert transcript == "hello world"
+    assert seen["http_url"] == "http://proxy.internal:8080"
+    assert seen["https_url"] is None
 
 
 def test_create_app_skips_static_mount_when_directory_is_missing(monkeypatch) -> None:
